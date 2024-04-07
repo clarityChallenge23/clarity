@@ -1,14 +1,15 @@
-"""
-Adopted from https://github.com/kaituoxu/Conv-TasNet
-"""
+"""Adopted from https://github.com/kaituoxu/Conv-TasNet"""
+
+from __future__ import annotations
+
 import math
-from typing import Optional
+from typing import Final
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
-EPS = 1e-8
+EPS: Final = 1e-8
 
 
 def overlap_and_add(signal, frame_step, device):
@@ -23,7 +24,8 @@ def overlap_and_add(signal, frame_step, device):
     Args:
         signal: A [..., frames, frame_length] Tensor. All dimensions may be unknown,
             and rank must be at least 2.
-        frame_step: An integer denoting overlap offsets. Must be less than or equal to frame_length.
+        frame_step: An integer denoting overlap offsets. Must be less than or equal to
+            frame_length.
         device: Whether to use 'cpu' or 'cuda' for processing.
 
     Returns:
@@ -31,8 +33,11 @@ def overlap_and_add(signal, frame_step, device):
             signal's inner-most two dimensions.
         output_size = (frames - 1) * frame_step + frame_length
 
-    Based on https://github.com/tensorflow/tensorflow/blob/r1.12/tensorflow/contrib/signal/python/ops/reconstruction_ops.py
+    Based on https://github.com/tensorflow/tensorflow/blob/r1.12/tensorflow/
+        contrib/signal/python/ops/reconstruction_ops.py
     """
+    signal = signal.to(device)
+
     outer_dimensions = signal.size()[:-2]
     frames, frame_length = signal.size()[-2:]
 
@@ -174,7 +179,7 @@ class SpatialEncoder(nn.Module):
     """Estimation of the nonnegative mixture weight by a 1-D conv layer."""
 
     def __init__(self, L, N, num_channels):
-        super(SpatialEncoder, self).__init__()
+        super().__init__()
         # Hyper-parameter
         self.L, self.N = L, N
         # Components
@@ -195,7 +200,7 @@ class SpatialEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, N, L, device: Optional[str] = None):
+    def __init__(self, N, L, device: str | None = None):
         super().__init__()
         # device for overlap_and add
         if device is None:

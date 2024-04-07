@@ -1,3 +1,7 @@
+"""Tests the full CEC1 baseline pipeline"""
+
+# pylint: disable=too-many-locals invalid-name
+
 # Regression test
 # Pass some random data through code and compare with reference output
 # CEC1 scene_renderer, enhancer, compressor, MSBG and MBSTOI
@@ -13,9 +17,9 @@ from clarity.enhancer.compressor import Compressor
 from clarity.enhancer.nalr import NALR
 from clarity.evaluator.mbstoi.mbstoi import mbstoi
 from clarity.evaluator.mbstoi.mbstoi_utils import find_delay_impulse
-from clarity.evaluator.msbg.audiogram import Audiogram
 from clarity.evaluator.msbg.msbg import Ear
 from clarity.evaluator.msbg.msbg_utils import MSBG_FS, pad
+from clarity.utils.audiogram import Audiogram
 
 
 def listen(ear, signal, audiogram_l, audiogram_r):
@@ -39,7 +43,8 @@ def listen(ear, signal, audiogram_l, audiogram_r):
     return np.concatenate([out_l, out_r]).T
 
 
-def test_full_CEC1_pipeline(regtest):
+def test_full_cec1_pipeline(regtest):
+    """Tests the full CEC1 baseline pipeline"""
     np.random.seed(0)
 
     scene = {
@@ -65,12 +70,11 @@ def test_full_CEC1_pipeline(regtest):
         "scene": "S06001",
         "dataset": ".",
         "pre_samples": 88200,
-        "post_samples": 44100,
+        "post_samples": 0,
         "SNR": 0.586,
     }
 
     with tempfile.TemporaryDirectory() as output_path:
-
         renderer = Renderer(
             input_path="tests/test_data",
             output_path=output_path,
@@ -81,9 +85,9 @@ def test_full_CEC1_pipeline(regtest):
             pre_samples=scene["pre_samples"],
             post_samples=scene["post_samples"],
             dataset=scene["dataset"],
-            target=scene["target"]["name"],
+            target_id=scene["target"]["name"],
             noise_type=scene["interferer"]["type"],
-            interferer=scene["interferer"]["name"],
+            interferer_id=scene["interferer"]["name"],
             room=scene["room"]["name"],
             scene=scene["scene"],
             offset=scene["interferer"]["offset"],
@@ -96,15 +100,16 @@ def test_full_CEC1_pipeline(regtest):
     reference = reference.astype(float)  # / 32768.0
     signal = signal.astype(float)  # / 32768.0
 
-    # Truncate to just over 2 seconds - i.e. just use part of the signals to speed up the HASPI calculation a little
-    signal = signal[100000:200000, :]
-    reference = reference[100000:200000, :]
+    # Truncate to just over 1/2 second - i.e. just use part of the signals to
+    # speed up the HASPI calculation a little
+    signal = signal[100000:125000, :]
+    reference = reference[100000:125000, :]
 
     # The data below doesn't really need to be meaningful.
     # The purpose of the test is not to see if the haspi score is reasonable
     # but just to check that the results do not change unexpectedly across releases.
 
-    nalr_cfg = {"nfir": 220, "fs": 44100}
+    nalr_cfg = {"nfir": 220, "sample_rate": 44100}
     compressor_cfg = {
         "threshold": 0.35,
         "attenuation": 0.1,
@@ -113,11 +118,9 @@ def test_full_CEC1_pipeline(regtest):
         "rms_buffer_size": 0.064,
     }
 
-    sample_frequency = 44100
-
     msbg_ear_cfg = {
         "src_pos": "ff",
-        "sample_frequency": sample_frequency,
+        "sample_rate": 44100,
         "equiv_0db_spl": 100,
         "ahr": 20,
     }
@@ -128,16 +131,16 @@ def test_full_CEC1_pipeline(regtest):
 
     ear = Ear(**msbg_ear_cfg)
 
-    left_audiogram = Audiogram(cfs=audiogram_cfs, levels=audiogram_l)
-    right_audiogram = Audiogram(cfs=audiogram_cfs, levels=audiogram_r)
+    audiogram_left = Audiogram(frequencies=audiogram_cfs, levels=audiogram_l)
+    audiogram_right = Audiogram(frequencies=audiogram_cfs, levels=audiogram_r)
 
     enhancer = NALR(**nalr_cfg)
     compressor = Compressor(**compressor_cfg)
 
-    nalr_fir, _ = enhancer.build(audiogram_l, audiogram_cfs)
+    nalr_fir, _ = enhancer.build(audiogram_left)
     out_l = enhancer.apply(nalr_fir, signal[:, 0])
 
-    nalr_fir, _ = enhancer.build(audiogram_r, audiogram_cfs)
+    nalr_fir, _ = enhancer.build(audiogram_right)
     out_r = enhancer.apply(nalr_fir, signal[:, 1])
 
     out_l, _, _ = compressor.process(out_l)
@@ -147,13 +150,15 @@ def test_full_CEC1_pipeline(regtest):
     enhanced_audio = np.tanh(enhanced_audio) * 100  # * 10000
 
     # Create discrete delta function (DDF) signal for time alignment
-    ddf_signal = np.zeros((np.shape(signal)))
+    ddf_signal = np.zeros(np.shape(signal))
+
+    print(ddf_signal.shape)
     ddf_signal[:, 0] = unit_impulse(len(signal), int(MSBG_FS / 2))
     ddf_signal[:, 1] = unit_impulse(len(signal), int(MSBG_FS / 2))
 
     # Pass through MSBG hearing loss model
-    reference_processed = listen(ear, reference, left_audiogram, right_audiogram)
-    signal_processed = listen(ear, enhanced_audio, left_audiogram, right_audiogram)
+    reference_processed = listen(ear, reference, audiogram_left, audiogram_right)
+    signal_processed = listen(ear, enhanced_audio, audiogram_left, audiogram_right)
 
     # Calculate channel-specific unit impulse delay due to HL model and audiograms
     delay = find_delay_impulse(ddf_signal, initial_value=int(MSBG_FS / 2))
@@ -168,12 +173,12 @@ def test_full_CEC1_pipeline(regtest):
 
     assert len(proc_pad) >= len(signal_processed)
 
-    clean_pad[
-        int(delay[0]) : int(len(reference_processed) + int(delay[0])), 0
-    ] = reference_processed[:, 0]
-    clean_pad[
-        int(delay[1]) : int(len(reference_processed) + int(delay[1])), 1
-    ] = reference_processed[:, 1]
+    clean_pad[int(delay[0]) : int(len(reference_processed) + int(delay[0])), 0] = (
+        reference_processed[:, 0]
+    )
+    clean_pad[int(delay[1]) : int(len(reference_processed) + int(delay[1])), 1] = (
+        reference_processed[:, 1]
+    )
     proc_pad[: len(signal_processed)] = signal_processed
 
     grid_coarseness = 1

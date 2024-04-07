@@ -1,11 +1,13 @@
 """ Run the dummy enhancement. """
+
 import json
 import logging
 
 import hydra
 import pandas as pd
-from evaluate import make_scene_listener_list
 from omegaconf import DictConfig
+
+from recipes.icassp_2023.baseline.evaluate import make_scene_listener_list
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 def report_score(cfg: DictConfig) -> None:
     """Run the dummy enhancement."""
 
-    with open(cfg.path.scenes_listeners_file, "r", encoding="utf-8") as fp:
+    with open(cfg.path.scenes_listeners_file, encoding="utf-8") as fp:
         scenes_listeners = json.load(fp)
 
     results_df = pd.read_csv("scores.csv")
@@ -40,5 +42,6 @@ def report_score(cfg: DictConfig) -> None:
         print(selected_results_df[["haspi", "hasqi", "combined"]].mean(axis=0))
 
 
+# pylint: disable=no-value-for-parameter
 if __name__ == "__main__":
     report_score()

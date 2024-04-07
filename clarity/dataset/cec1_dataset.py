@@ -1,5 +1,6 @@
 import json
-import os
+import logging
+from pathlib import Path
 
 import librosa
 import numpy as np
@@ -7,6 +8,8 @@ import torch
 from scipy.signal import firwin, lfilter
 from soundfile import read
 from torch.utils import data
+
+logger = logging.getLogger(__name__)
 
 
 def read_wavfile(path):
@@ -19,7 +22,7 @@ class CEC1Dataset(data.Dataset):
         self,
         scenes_folder,
         scenes_file,
-        sr,
+        sample_rate,
         downsample_factor,
         wav_sample_len=None,
         wav_silence_len=2,
@@ -28,7 +31,7 @@ class CEC1Dataset(data.Dataset):
         testing=False,
     ):
         self.scenes_folder = scenes_folder
-        self.sr = sr
+        self.sample_rate = sample_rate
         self.downsample_factor = downsample_factor
         self.wav_sample_len = wav_sample_len
         self.wav_silence_len = wav_silence_len
@@ -37,15 +40,14 @@ class CEC1Dataset(data.Dataset):
         self.testing = testing
 
         self.scene_list = []
-        with open(scenes_file, "r") as f:
-            scene_json = json.load(f)
+        with open(scenes_file, encoding="utf-8") as fp:
+            scene_json = json.load(fp)
             if not testing:
-                for i in range(len(scene_json)):
-                    self.scene_list.append(scene_json[i]["scene"])
+                for scene in scene_json:
+                    self.scene_list.append(scene["scene"])
             else:
                 for scene in scene_json.keys():
                     self.scene_list.append(scene)
-            f.close()
 
         if self.num_channels == 2:
             self.mixed_suffix = "_mixed_CH1.wav"
@@ -58,28 +60,28 @@ class CEC1Dataset(data.Dataset):
 
         self.lowpass_filter = firwin(
             1025,
-            self.sr // (2 * self.downsample_factor),
+            self.sample_rate // (2 * self.downsample_factor),
             pass_zero="lowpass",
-            fs=self.sr,
+            fs=self.sample_rate,
         )
 
     def wav_sample(self, x, y):
         """
         A 2 second silence is in the beginning of clarity data
-        Get rid of the silence segment in the beginning & sample a constant wav length for training.
+        Get rid of the silence segment in the beginning & sample a
+        constant wav length for training.
         """
-        silence_len = int(self.wav_silence_len * self.sr)
+        silence_len = int(self.wav_silence_len * self.sample_rate)
         x = x[:, silence_len:]
         y = y[:, silence_len:]
 
         wav_len = x.shape[1]
-        sample_len = self.wav_sample_len * self.sr
+        sample_len = int(self.wav_sample_len * self.sample_rate)
         if wav_len > sample_len:
             start = np.random.randint(wav_len - sample_len)
             end = start + sample_len
             x = x[:, start:end]
             y = y[:, start:end]
-            return x, y
         elif wav_len < sample_len:
             x = np.append(
                 x, np.zeros([x.shape[1], sample_len - wav_len], dtype=np.float32)
@@ -87,46 +89,63 @@ class CEC1Dataset(data.Dataset):
             y = np.append(
                 y, np.zeros([x.shape[1], sample_len - wav_len], dtype=np.float32)
             )
-            return x, y
-        else:
-            return x, y
+
+        return x, y
 
     def lowpass_filtering(self, x):
         return lfilter(self.lowpass_filter, 1, x)
 
     def __getitem__(self, item):
+        scenes_folder = Path(self.scenes_folder)
         if self.num_channels == 2:
             mixed = read_wavfile(
-                os.path.join(
-                    self.scenes_folder, self.scene_list[item] + self.mixed_suffix
-                )
+                scenes_folder / (self.scene_list[item] + self.mixed_suffix)
             )
         elif self.num_channels == 6:
             mixed = []
             for suffix in self.mixed_suffix:
                 mixed.append(
-                    read_wavfile(
-                        os.path.join(self.scenes_folder, self.scene_list[item] + suffix)
-                    )
+                    read_wavfile(scenes_folder / (self.scene_list[item] + suffix))
                 )
             mixed = np.concatenate(mixed, axis=0)
         else:
             raise NotImplementedError
+        target = None
         if not self.testing:
             target = read_wavfile(
-                os.path.join(
-                    self.scenes_folder, self.scene_list[item] + self.target_suffix
-                )
+                scenes_folder / (self.scene_list[item] + self.target_suffix)
             )
+            if target.shape[1] > mixed.shape[1]:
+                logging.warning(
+                    "Target length is longer than mixed length. Truncating target."
+                )
+                target = target[:, : mixed.shape[1]]
+            elif target.shape[1] < mixed.shape[1]:
+                logging.warning(
+                    "Target length is shorter than mixed length. Padding target."
+                )
+                target = np.pad(
+                    target,
+                    ((0, 0), (0, mixed.shape[1] - target.shape[1])),
+                    mode="constant",
+                )
 
-        if self.sr != 44100:
+        if self.sample_rate != 44100:
             mixed_resampled, target_resampled = [], []
             for i in range(mixed.shape[0]):
-                mixed_resampled.append(librosa.resample(mixed[i], 44100, self.sr))
+                mixed_resampled.append(
+                    librosa.resample(
+                        mixed[i], target_sr=44100, orig_sr=self.sample_rate
+                    )
+                )
             mixed = np.array(mixed_resampled)
-            if not self.testing:
+            if target is not None:
                 for i in range(target.shape[0]):
-                    target_resampled.append(librosa.resample(target[i], 44100, self.sr))
+                    target_resampled.append(
+                        librosa.resample(
+                            target[i], target_sr=44100, orig_sr=self.sample_rate
+                        )
+                    )
                 target = np.array(target_resampled)
 
         if self.wav_sample_len is not None:
@@ -135,15 +154,21 @@ class CEC1Dataset(data.Dataset):
         if self.norm:
             mixed_max = np.max(np.abs(mixed))
             mixed = mixed / mixed_max
-            target = target / mixed_max
+            if target is not None:
+                target = target / mixed_max
 
         if not self.testing:
-            return (
+            return_data = (
                 torch.tensor(mixed, dtype=torch.float32),
                 torch.tensor(target, dtype=torch.float32),
             )
         else:
-            return torch.tensor(mixed, dtype=torch.float32), self.scene_list[item]
+            return_data = (
+                torch.tensor(mixed, dtype=torch.float32),
+                self.scene_list[item],
+            )
+
+        return return_data
 
     def __len__(self):
         return len(self.scene_list)

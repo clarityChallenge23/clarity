@@ -1,5 +1,6 @@
 """Tests for the data.utils module."""
-from typing import List
+
+from __future__ import annotations
 
 import numpy as np
 import pytest
@@ -46,7 +47,9 @@ def test_better_ear_speechweighted_snr(
     """Test of better_ear_speechweighted_snr()."""
     better_ear_signal_noise_ratio = better_ear_speechweighted_snr(target, noise)
     assert isinstance(better_ear_signal_noise_ratio, float)
-    assert better_ear_signal_noise_ratio == expected
+    assert better_ear_signal_noise_ratio == pytest.approx(
+        expected, rel=pytest.rel_tolerance, abs=pytest.abs_tolerance
+    )
 
 
 def test_better_ear_speechweighted_snr_noise_wrong_shape_index_error() -> None:
@@ -75,11 +78,15 @@ def test_better_ear_speechweighted_snr_noise_wrong_shape_index_error() -> None:
         ),
     ],
 )
-def test_speechweighted_snr(target: np.array, noise: np.array, expected: float) -> None:
+def test_speechweighted_snr(
+    target: np.ndarray, noise: np.ndarray, expected: float
+) -> None:
     """Test of speechweighted_snr()."""
     signal_noise_ratio = speechweighted_snr(target, noise)
     assert isinstance(signal_noise_ratio, float)
-    assert signal_noise_ratio == expected
+    assert signal_noise_ratio == pytest.approx(
+        expected, rel=pytest.rel_tolerance, abs=pytest.abs_tolerance
+    )
 
 
 def test_speechweighted_snr_unequal_arrays_value_error() -> None:
@@ -111,7 +118,7 @@ def test_speechweighted_snr_unequal_arrays_value_error() -> None:
         ),
     ],
 )
-def test_sum_signals(signals: List[int], expected: np.ndarray) -> None:
+def test_sum_signals(signals: list[int], expected: np.ndarray) -> None:
     """Test of sum_signals()."""
     summed_signals = sum_signals(signals)
     np.testing.assert_array_equal(summed_signals, expected)
@@ -141,5 +148,5 @@ def test_pad(signal: np.ndarray, length: int, expected: np.ndarray) -> None:
 
 def test_pad_invalid_length_assertion_error() -> None:
     """Test pad() raises an exception when length < signal.shape[0]."""
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         pad(signal=np.asarray([[1, 2, 3], [4, 5, 6], [7, 8, 9]]), length=2)

@@ -1,33 +1,36 @@
 """Gammatone filterbank simulation of the Cochlea."""
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
-from typing import Dict, Tuple, Union
+from typing import Any
 
 import numpy as np
 import scipy
+from numpy import ndarray
 from scipy import signal
 
-from clarity.evaluator.msbg.audiogram import Audiogram
 from clarity.evaluator.msbg.msbg_utils import read_gtf_file
 from clarity.evaluator.msbg.smearing import Smearer
+from clarity.utils.audiogram import Audiogram
 
 # TODO: Fix power overflow error when (expansion_ratios[ixch] - 1) < 0
 
 
 @dataclass
 class FilterBank:
-    """Holds the numerators and demoninators of an IIR filter bank."""
+    """Holds the numerators and denominators of an IIR filter bank."""
 
     nums: np.ndarray
     denoms: np.ndarray
 
 
 # Parameters for smearing and gammatone filtering according to degree of loss
-HL_PARAMS: Dict[str, Dict[str, Union[str, tuple]]] = {
+HL_PARAMS: dict[str, dict[str, Any]] = {
     "SEVERE": {
         "gtfbank_file": "GT4FBank_Brd3.0E_Spaced2.3E_44100Fs",
-        "smear_params": (4, 2),  # asymmetric severe smearing
+        "smear_params": (4.0, 2.0),  # asymmetric severe smearing
     },
     "MODERATE": {
         "gtfbank_file": "GT4FBank_Brd2.0E_Spaced1.5E_44100Fs",
@@ -45,8 +48,8 @@ HL_PARAMS: Dict[str, Dict[str, Union[str, tuple]]] = {
 
 
 def compute_recruitment_parameters(
-    gtn_cf: np.ndarray, audiogram: Audiogram, catch_up: float
-) -> Tuple[np.ndarray, np.ndarray]:
+    gtn_cf: ndarray, audiogram: Audiogram, catch_up: float
+) -> tuple[ndarray, ndarray]:
     """Compute parameters to be used in recruitment model.
 
     Computes expansion ratios for each gammatone filterbank channel and
@@ -65,16 +68,16 @@ def compute_recruitment_parameters(
     cf_expansion = np.zeros(gtn_cf.shape)  # expansion ratios
 
     for ix_cf in np.arange(0, gtn_cf.shape[0]):
-        if gtn_cf[ix_cf] < audiogram.cfs[0]:
+        if gtn_cf[ix_cf] < audiogram.frequencies[0]:
             # Extend audiogram, flat below lowest freq measured
             cf_expansion[ix_cf] = catch_up / (catch_up - audiogram.levels[0])
-        elif gtn_cf[ix_cf] > audiogram.cfs[-1]:
+        elif gtn_cf[ix_cf] > audiogram.frequencies[-1]:
             # Extend audiogram, flat above highest freq measured
             cf_expansion[ix_cf] = catch_up / (catch_up - audiogram.levels[-1])
         else:
             # In the sensible region
             cf_to_level_fn = scipy.interpolate.interp1d(
-                audiogram.cfs, audiogram.levels, kind="linear"
+                audiogram.frequencies, audiogram.levels, kind="linear"
             )
             # Assumes catch-up at catch_up dB (typ 100-105)
             cf_expansion[ix_cf] = catch_up / (catch_up - cf_to_level_fn(gtn_cf[ix_cf]))
@@ -86,13 +89,13 @@ def compute_recruitment_parameters(
 
 
 def gammatone_filterbank(
-    x: np.ndarray,
+    x: ndarray,
     ngamma: int,
     gtn_filters: FilterBank,
-    gtn_delays: np.ndarray,
+    gtn_delays: ndarray,
     start2poleHP: int,
     hp_filters: FilterBank,
-) -> np.ndarray:
+) -> ndarray:
     """Pass signal through gammatone filterbank.
 
     Args:
@@ -135,9 +138,7 @@ def gammatone_filterbank(
     return cochleagram
 
 
-def compute_envelope(
-    coch_sig: np.ndarray, erbn_cf: np.ndarray, fs: float
-) -> np.ndarray:
+def compute_envelope(coch_sig: ndarray, erbn_cf: ndarray, fs: float) -> ndarray:
     """Obtain signal envelope.
 
     Envelope computed using full-wave rectification and low-pass filter
@@ -151,7 +152,6 @@ def compute_envelope(
         ndarray: signal envelope
 
     """
-
     envelope = np.zeros(coch_sig.shape)
     n_chans = coch_sig.shape[0]
     for ixch in np.arange(0, n_chans):
@@ -174,12 +174,12 @@ def compute_envelope(
 
 
 def recruitment(
-    coch_sig: np.ndarray,
-    envelope: np.ndarray,
-    SPL_equiv_0dB: float,
-    expansion_ratios: np.ndarray,
-    eq_loud_db: np.ndarray,
-) -> np.ndarray:
+    coch_sig: ndarray,
+    envelope: ndarray,
+    SPL_equiv_0dB: int | float,
+    expansion_ratios: ndarray,
+    eq_loud_db: ndarray,
+) -> ndarray:
     """Simulate loudness recruitment.
 
     Args:
@@ -225,12 +225,13 @@ class Cochlea:
 
     def __init__(
         self, audiogram: Audiogram, catch_up_level: float = 105.0, fs: float = 44100.0
-    ):
+    ) -> None:
         """Cochlea constructor.
 
         Args:
             audiogram (Audiogram): Audiogram characterising hearing loss
-            catch_up_level (float, optional): loudness catch-up level in dB (default: {105})
+            catch_up_level (float, optional): loudness catch-up level in dB
+                Default is 105 dB
             fs (float, optional): sampling frequency
 
         """
@@ -244,18 +245,18 @@ class Cochlea:
             f"msbg_hparams/{HL_PARAMS[severity_level]['gtfbank_file']}.json"
         )
         self.cf_expansion, self.eq_loud_db_catch_up = compute_recruitment_parameters(
-            self.gtfbank_params["GTn_CentFrq"], audiogram, catch_up_level
+            np.array(self.gtfbank_params["GTn_CentFrq"]), audiogram, catch_up_level
         )
 
         # Set-up the smearer
         self.smearer = None
         if severity_level != "NOTHING":
-            smear_params = HL_PARAMS[severity_level]["smear_params"]
-            self.smearer = Smearer(smear_params[0], smear_params[1], fs)
+            r_lower, r_upper = HL_PARAMS[severity_level]["smear_params"]
+            self.smearer = Smearer(r_lower, r_upper, fs)
 
         logging.info("Severity level - %s", severity_level)
 
-    def simulate(self, coch_sig: np.ndarray, equiv_0dB_file_SPL: float) -> np.ndarray:
+    def simulate(self, coch_sig: ndarray, equiv_0dB_file_SPL: float) -> ndarray:
         """Pass a signal through the cochlea.
 
         Args:
@@ -274,12 +275,14 @@ class Cochlea:
             coch_sig,
             self.gtfbank_params["NGAMMA"],
             FilterBank(
-                self.gtfbank_params["GTn_nums"], self.gtfbank_params["GTn_denoms"]
+                np.array(self.gtfbank_params["GTn_nums"]),
+                np.array(self.gtfbank_params["GTn_denoms"]),
             ),
-            self.gtfbank_params["GTnDelays"],
+            np.array(self.gtfbank_params["GTnDelays"]),
             self.gtfbank_params["Start2PoleHP"],
             FilterBank(
-                self.gtfbank_params["HP_nums"], self.gtfbank_params["HP_denoms"]
+                np.array(self.gtfbank_params["HP_nums"]),
+                np.array(self.gtfbank_params["HP_denoms"]),
             ),
         )
 

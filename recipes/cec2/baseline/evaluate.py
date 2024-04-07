@@ -2,7 +2,8 @@ import csv
 import hashlib
 import json
 import logging
-import os
+from pathlib import Path
+from typing import Dict
 
 import hydra
 import numpy as np
@@ -11,14 +12,15 @@ from scipy.io import wavfile
 from tqdm import tqdm
 
 from clarity.evaluator.haspi import haspi_v2_be
+from clarity.utils.audiogram import Listener
 
 logger = logging.getLogger(__name__)
 
 
-def read_csv_scores(file):
+def read_csv_scores(file: Path) -> Dict[str, float]:
     score_dict = {}
-    with open(file, "r") as f:
-        reader = csv.reader(f)
+    with file.open("r", encoding="utf-8") as fp:
+        reader = csv.reader(fp)
         _ = next(reader)
         for row in reader:
             score_dict[row[0] + "_" + row[1]] = float(row[2])
@@ -27,63 +29,56 @@ def read_csv_scores(file):
 
 @hydra.main(config_path=".", config_name="config")
 def run_calculate_SI(cfg: DictConfig) -> None:
-    scenes_listeners = json.load(open(cfg.path.scenes_listeners_file))
-    listener_audiograms = json.load(open(cfg.path.listeners_file))
-    os.makedirs(cfg.path.exp_folder, exist_ok=True)
+    with Path(cfg.path.scenes_listeners_file).open("r", encoding="utf-8") as fp:
+        scenes_listeners = json.load(fp)
 
-    enhanced_folder = os.path.join(cfg.path.exp_folder, "enhanced_signals")
+    listener_dict = Listener.load_listener_dict(cfg.path.listeners_file)
+    Path(cfg.path.exp_folder).mkdir(parents=True, exist_ok=True)
+
+    enhanced_folder = Path(cfg.path.exp_folder) / "enhanced_signals"
 
     if cfg.evaluate.cal_unprocessed_si:
-        unproc_si_file = os.path.join(cfg.path.exp_folder, "si_unproc.csv")
+        unproc_si_file = Path(cfg.path.exp_folder) / "si_unproc.csv"
         unproc_csv_lines = [["scene", "listener", "haspi"]]
-        if os.path.exists(unproc_si_file):
+        if unproc_si_file.exists():
             score_dict = read_csv_scores(unproc_si_file)
             ave_score = np.mean(list(score_dict.values()))
             logger.info(
-                "si_unproc.csv exists, and the average HASPI scores for unprocessed scenes is {:.4f}".format(
-                    ave_score
-                )
+                "si_unproc.csv exists, and the average HASPI scores for unprocessed "
+                "scenes is %.4f",
+                ave_score,
             )
 
-    si_file = os.path.join(cfg.path.exp_folder, "si.csv")
+    si_file = Path(cfg.path.exp_folder) / "si.csv"
     csv_lines = [["scene", "listener", "haspi"]]
-    if os.path.exists(si_file):
+    if si_file.exists():
         score_dict = read_csv_scores(si_file)
         ave_score = np.mean(list(score_dict.values()))
-        logger.info(
-            "si.csv exists, and the average HASPI scores is {:.4f}".format(ave_score)
-        )
+        logger.info("si.csv exists, and the average HASPI scores is %4f", ave_score)
         return
 
     for scene in tqdm(scenes_listeners):
-        for listener in scenes_listeners[scene]:
-            logger.info(f"Running SI calculation: scene {scene}, listener {listener}")
+        for listener_id in scenes_listeners[scene]:
+            logger.info(
+                f"Running SI calculation: scene {scene}, listener {listener_id}"
+            )
             if cfg.evaluate.set_random_seed:
                 scene_md5 = int(hashlib.md5(scene.encode("utf-8")).hexdigest(), 16) % (
                     10**8
                 )
                 np.random.seed(scene_md5)
-
-            # retrieve audiograms
-            cfs = np.array(listener_audiograms[listener]["audiogram_cfs"])
-            audiogram_left = np.array(
-                listener_audiograms[listener]["audiogram_levels_l"]
-            )
-            audiogram_right = np.array(
-                listener_audiograms[listener]["audiogram_levels_r"]
-            )
-
+            listener = listener_dict[listener_id]
             # retrieve signals
             fs_proc, proc = wavfile.read(
-                os.path.join(enhanced_folder, f"{scene}_{listener}_HA-output.wav")
+                enhanced_folder / f"{scene}_{listener_id}_HA-output.wav"
             )
 
             fs_ref_anechoic, ref_anechoic = wavfile.read(
-                os.path.join(cfg.path.scenes_folder, f"{scene}_target_anechoic_CH1.wav")
+                Path(cfg.path.scenes_folder) / f"{scene}_target_anechoic_CH1.wav"
             )
 
             fs_ref_target, ref_target = wavfile.read(
-                os.path.join(cfg.path.scenes_folder, f"{scene}_target_CH1.wav")
+                Path(cfg.path.scenes_folder) / f"{scene}_target_CH1.wav"
             )
 
             assert fs_ref_anechoic == fs_ref_target == fs_proc
@@ -101,13 +96,11 @@ def run_calculate_SI(cfg: DictConfig) -> None:
                 reference_right=ref[:, 1],
                 processed_left=proc[:, 0],
                 processed_right=proc[:, 1],
-                fs_signal=fs_ref_anechoic,
-                audiogram_left=audiogram_left,
-                audiogram_right=audiogram_right,
-                audiogram_cfs=cfs,
+                sample_rate=fs_ref_anechoic,
+                listener=listener,
             )
             logger.info(f"The HASPI score is {si}")
-            csv_lines.append([scene, listener, str(si)])
+            csv_lines.append([scene, listener_id, str(si)])
 
             if cfg.evaluate.cal_unprocessed_si:
                 if cfg.evaluate.set_random_seed:
@@ -116,8 +109,8 @@ def run_calculate_SI(cfg: DictConfig) -> None:
                     ) % (10**8)
                     np.random.seed(scene_md5)
 
-                fs_unproc, unproc = wavfile.read(
-                    os.path.join(cfg.path.scenes_folder, f"{scene}_mix_CH1.wav")
+                _fs_unproc, unproc = wavfile.read(
+                    Path(cfg.path.scenes_folder) / f"{scene}_mix_CH1.wav"
                 )
                 unproc = unproc / 32768.0
                 si_unproc = haspi_v2_be(
@@ -125,15 +118,13 @@ def run_calculate_SI(cfg: DictConfig) -> None:
                     reference_right=ref[:, 1],
                     processed_left=unproc[:, 0],
                     processed_right=unproc[:, 1],
-                    fs_signal=fs_ref_anechoic,
-                    audiogram_left=audiogram_left,
-                    audiogram_right=audiogram_right,
-                    audiogram_cfs=cfs,
+                    sample_rate=fs_ref_anechoic,
+                    listener=listener,
                 )
                 logger.info(f"The unprocessed signal HASPI score is {si_unproc}")
-                unproc_csv_lines.append([scene, listener, str(si_unproc)])
+                unproc_csv_lines.append([scene, listener_id, str(si_unproc)])
 
-    with open(si_file, "w") as csv_f:
+    with si_file.open("w", encoding="utf-8") as csv_f:
         csv_writer = csv.writer(
             csv_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
@@ -141,12 +132,10 @@ def run_calculate_SI(cfg: DictConfig) -> None:
             csv_writer.writerow(line)
     score_dict = read_csv_scores(si_file)
     ave_score = np.mean(list(score_dict.values()))
-    logger.info(
-        "si.csv exists, and the average HASPI scores is {:.4f}".format(ave_score)
-    )
+    logger.info("si.csv exists, and the average HASPI scores is %.4f", ave_score)
 
     if cfg.evaluate.cal_unprocessed_si:
-        with open(unproc_si_file, "w") as csv_f:
+        with unproc_si_file.open("w", encoding="utf-8") as csv_f:
             csv_writer = csv.writer(
                 csv_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
             )
@@ -155,11 +144,12 @@ def run_calculate_SI(cfg: DictConfig) -> None:
         score_dict = read_csv_scores(unproc_si_file)
         ave_score = np.mean(list(score_dict.values()))
         logger.info(
-            "si_unproc.csv exists, and the average HASPI scores for unprocessed scenes is {:.4f}".format(
-                ave_score
-            )
+            "si_unproc.csv exists, and the average HASPI scores "
+            "for unprocessed scenes is %.4f",
+            ave_score,
         )
 
 
+# pylint: disable=no-value-for-parameter
 if __name__ == "__main__":
     run_calculate_SI()

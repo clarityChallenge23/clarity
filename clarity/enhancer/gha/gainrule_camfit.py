@@ -1,15 +1,30 @@
+from __future__ import annotations
+
 import copy
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.interpolate import interp1d
 
+from clarity.utils.audiogram import Audiogram
 
-def compute_proportion_overlap(a1, a2, b1, b2):
+if TYPE_CHECKING:
+    from numpy import ndarray
+
+    from clarity.enhancer.gha.gha_utils import FittingParams
+
+
+def compute_proportion_overlap(
+    a1: float,
+    a2: float,
+    b1: float,
+    b2: float,
+) -> float:
     """Compute proportion of overlap of two ranges.
 
     For ranges (a1, a2) and (b1, b2), express the extent of the overlap
-    in the range as a proportion of the extent of range (b1, b2).add()
+    in the range as a proportion of the extent of range (b1, b2)
 
     e.g (4, 9) and (6, 15) -> overlap (6,9), so proportion is (9-6)/(15-6)
 
@@ -17,13 +32,12 @@ def compute_proportion_overlap(a1, a2, b1, b2):
     left = max(a1, b1)
     right = min(a2, b2)
     if left > right:
-        overlap = 0.0
-    else:
-        overlap = float(right - left) / (b2 - b1)
-    return overlap
+        return 0.0
+
+    return float(right - left) / (b2 - b1)
 
 
-def isothr(vsDesF):
+def isothr(vsDesF: list[int] | ndarray) -> ndarray:
     """Calculate conversion factors of HL thresholds to SPL thresholds.
 
     Translation of OpenMHA isothr.m. Calculates conversion factors of HL
@@ -128,41 +142,12 @@ def isothr(vsDesF):
     return vIsoThrDB
 
 
-def freq_interp_sh(f_in, y_in, f):
-    """Linear interpolation on logarithmic frequency scale.
-
-    Has samples and hold on edges.
-
-    Args:
-        f_in (ndarray): audiogram frequencies (Hz)
-        y_in (ndarray): audiogram levels
-        f (list): FFT filterbank frequencies
-
-    Returns:
-        ndarray: interpolated levels corresponding to filterbank frequencies
-
-    """
-
-    # Checks
-    if np.size(f[0]) > 1:
-        f = f[0]
-    if np.size(f_in[0]) > 1:
-        f_in = f_in[0]
-    if np.size(y_in[0]) > 1:
-        y_in = y_in[0]
-
-    vals = np.pad(
-        f_in.astype(float), 1, constant_values=((0.5 * f_in[0], 2 * f_in[-1]))
-    )
-    yvals = np.pad(y_in, 1, constant_values=((y_in[0], y_in[-1])))
-
-    y = interp1d(np.log(vals), yvals, fill_value="extrapolate")(np.log(f))
-    y = np.expand_dims(y, 0)
-
-    return y
-
-
-def gains(compr_thr_inputs, compr_thr_gains, compression_ratios, levels):
+def gains(
+    compr_thr_inputs: ndarray,
+    compr_thr_gains: ndarray,
+    compression_ratios: ndarray,
+    levels: ndarray,
+) -> ndarray:
     """Based on OpenMHA gains subfunction of gainrule_camfit_compr.
 
     Args:
@@ -191,8 +176,13 @@ def gains(compr_thr_inputs, compr_thr_gains, compression_ratios, levels):
 
 
 def gainrule_camfit_linear(
-    audiogram, sFitmodel, noisegatelevels=45, noisegateslope=1, max_output_level=100
-):
+    audiogram_left: Audiogram,
+    audiogram_right: Audiogram,
+    sFitmodel: FittingParams,
+    noisegatelevels: float | ndarray = 45.0,
+    noisegateslope: float | ndarray = 1.0,
+    max_output_level: float = 100.0,
+) -> tuple[ndarray, ndarray, ndarray, ndarray]:
     """Apply linear Cambridge rule for hearing aid fittings 'CAMFIT'.
 
     Based on OpenMHA gainrule_camfit_linear.m. Applies linear Cambridge rule for
@@ -223,24 +213,18 @@ def gainrule_camfit_linear(
             (default: 1)
 
     Returns:
-        dict: dictionary containing gain table, noise gate, and noise
-            gate expansion slope fields
+        tuple: containing gain table, noise gate, and noise
+            gate expansion slope
 
     """
 
-    intercept_frequencies = np.array(
-        [125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 5005]
+    intercepts_levels_freqs = Audiogram(
+        levels=np.array([-11, -10, -8, -6, 0, -1, 1, -1, 0, 1, 1]),
+        frequencies=np.array(
+            [125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 5005]
+        ),
     )
-    intercepts = np.array([-11, -10, -8, -6, 0, -1, 1, -1, 0, 1, 1])
-    try:
-        if np.size(sFitmodel["frequencies"][0][0]) > 1:
-            intercepts = freq_interp_sh(
-                intercept_frequencies, intercepts, sFitmodel["frequencies"][0][0]
-            )
-    except Exception:  # noqa E722
-        intercepts = freq_interp_sh(
-            intercept_frequencies, intercepts, sFitmodel["frequencies"]
-        )
+    intercepts = intercepts_levels_freqs.resample(sFitmodel["frequencies"]).levels
 
     sFitmodel_frequencies = sFitmodel["frequencies"]
     sFitmodel_levels = sFitmodel["levels"]
@@ -259,9 +243,8 @@ def gainrule_camfit_linear(
     noisegate_slope = np.zeros((np.size(sFitmodel_frequencies), 2))
     insertion_gains_out = np.zeros((np.size(sFitmodel_frequencies), 2))
 
-    for i, levels in enumerate([audiogram.levels_l, audiogram.levels_r]):
-        htlside = freq_interp_sh(audiogram.cfs, levels, sFitmodel_frequencies)
-
+    for i, audiogram in enumerate([audiogram_left, audiogram_right]):
+        htlside = audiogram.resample(sFitmodel_frequencies).levels
         insertion_gains = htlside * 0.48 + intercepts
 
         # According to B. Moore (1998), "Use of a loudness model for hearing-aid
@@ -271,12 +254,9 @@ def gainrule_camfit_linear(
         insertion_gains[insertion_gains < 0] = 0
 
         # Set all gains to 0 for 0dB HL flat audiogram
-        insertion_gains = insertion_gains * htlside.any()  # any(htlside)
+        insertion_gains = insertion_gains * htlside.any()
 
         sGt[:, :, i] = np.tile(insertion_gains, (len(sFitmodel_levels), 1))
-
-        if np.size(insertion_gains[0]) == np.size(htlside):
-            insertion_gains = insertion_gains[0]
 
         insertion_gains_out[:, i] = insertion_gains
         output_levels = np.tile(sFitmodel_levels, (np.size(insertion_gains), 1))
@@ -295,23 +275,18 @@ def gainrule_camfit_linear(
 
     # overall_level = 10 * np.log(np.sum(10 ** (insertion_gains_out / 10), axis=0))
 
-    output = {}
-    output["sGt"] = sGt
-    output["noisegate_level"] = noisegate_level
-    output["noisegate_slope"] = noisegate_slope
-    output["insertion_gains"] = insertion_gains_out
-
-    return output
+    return sGt, noisegate_level, noisegate_slope, insertion_gains_out
 
 
 def gainrule_camfit_compr(
-    audiogram,
-    sFitmodel,
-    noisegatelevels=45,
-    noisegateslope=1,
-    level=0,
-    max_output_level=100,
-):
+    audiogram_left: Audiogram,
+    audiogram_right: Audiogram,
+    sFitmodel: FittingParams,
+    noisegatelevels: float | ndarray = 45.0,
+    noisegateslope: float | ndarray = 1.0,
+    level: float = 0.0,
+    max_output_level: float = 100.0,
+) -> tuple[ndarray, ndarray, ndarray]:
     """Applies compressive Cambridge rule for hearing aid fittings 'CAMFIT'.
 
     Translation of OpenMHA gainrule_camfit_compr.m.
@@ -329,7 +304,8 @@ def gainrule_camfit_compr(
     openMHA is free software: see licencing conditions at http://www.openmha.org/
 
     Args:
-        audiogram (Audiogram): the audiogram for which to make the fit
+        audiogram_left (Audiogram): the audiogram for the left ear
+        audiogram_right (Audiogram): the audiogram for the right ear
         sFitmodel (dict): contains the center frequencies for the amplification
             bands and input levels in SPL for which to compute the gains
         noisegatelevels (ndarray): compression threshold levels for each frequency
@@ -340,8 +316,8 @@ def gainrule_camfit_compr(
         max_output_level (int): maximum output level in dB
 
     Returns:
-        dict: dictionary containing gain table, noise gate, and noise
-            gate expansion slope fields
+        tuple: containing gain table, noise gate, and noise
+            gate expansion slope
 
     """
 
@@ -378,7 +354,7 @@ def gainrule_camfit_compr(
             16000,
         ]
     )
-    LTASS_edge_freq = np.zeros((26))
+    LTASS_edge_freq = np.zeros(26)
     LTASS_edge_freq[1:-1] = np.sqrt(LTASS_freq[0:-1] * LTASS_freq[1:])
     LTASS_edge_freq[-1] = 16000 * np.power(2, (1 / 6))
     LTASS_lev = np.array(
@@ -426,8 +402,7 @@ def gainrule_camfit_compr(
             for (ltass_a, ltass_b) in zip(LTASS_edge_freq[:-1], LTASS_edge_freq[1:])
         ]
         intensity_sum = np.inner(LTASS_intensity, portion)  # weighted sum
-        speech_level_70_in_dc_band = 10 * np.log10(intensity_sum)
-        speech_level_65_in_dc_bands[band] = speech_level_70_in_dc_band - 5
+        speech_level_65_in_dc_bands[band] = 10 * np.log10(intensity_sum) - 5
 
     # minima in lowest level speech that needs to be understood is 38 dB below
     # speech_level_65_in_dc_bands
@@ -444,19 +419,22 @@ def gainrule_camfit_compr(
     htl = np.zeros((np.size(frequencies), 2))
     Gmin = np.zeros(np.shape(htl))
 
-    for i, levels in enumerate([audiogram.levels_l, audiogram.levels_r]):
-        htl[:, i] = freq_interp_sh(audiogram.cfs, levels, frequencies)
+    for i, audiogram in enumerate([audiogram_left, audiogram_right]):
+        htl[:, i] = audiogram.resample(frequencies).levels
         Gmin[:, i] = htl[:, i] + Conv - Lmin
 
     # Get input levels
     Lmid = speech_level_65_in_dc_bands
 
     # Calculate gains at centre frequencies
-    Gmid = gainrule_camfit_linear(
-        audiogram, sFitmodel, noisegatelevels, noisegateslope, max_output_level
+    gmid_sgt, _, _, insertion_gains = gainrule_camfit_linear(
+        audiogram_left,
+        audiogram_right,
+        sFitmodel,
+        noisegatelevels,
+        noisegateslope,
+        max_output_level,
     )
-    insertion_gains = Gmid["insertion_gains"]
-    Gmid = Gmid["sGt"]
 
     # Calculate compression ratios
     compression_ratio = np.zeros((np.size(frequencies), 2))
@@ -469,9 +447,9 @@ def gainrule_camfit_compr(
     if level != 0:
         cr_idx = [i for (i, val) in enumerate(sFitmodel_levels) if val == level]
 
-    for i, levels in enumerate([audiogram.levels_l, audiogram.levels_r]):
+    for i, levels in enumerate([audiogram_left.levels, audiogram_right.levels]):
         if level != 0:
-            tmp = Lmid + Gmid[cr_idx, :, i].flatten() - Lmin - Gmin[:, i]
+            tmp = Lmid + gmid_sgt[cr_idx, :, i].flatten() - Lmin - Gmin[:, i]
         else:
             tmp = Lmid + insertion_gains[:, i] - Lmin - Gmin[:, i]
         idx = [i for i, x in enumerate(tmp < 13) if x]
@@ -503,9 +481,4 @@ def gainrule_camfit_compr(
 
     logging.info("Noisegate levels are %s", noisegate_level)
 
-    output = {}
-    output["sGt"] = sGt
-    output["noisegatelevel"] = noisegate_level
-    output["noisegateslope"] = noisegate_slope
-
-    return output
+    return sGt, noisegate_level, noisegate_slope

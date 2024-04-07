@@ -1,24 +1,20 @@
-import os
-import sys
+"""Utilities for data generation."""
 
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
+from __future__ import annotations
 
-from typing import Union
+from pathlib import Path
+from typing import Final, Literal
 
 import numpy as np
 import scipy
 import scipy.io
 
-SPEECH_FILTER = scipy.io.loadmat(
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "params", "speech_weight.mat"
-    ),
-    squeeze_me=True,
+SPEECH_FILTER: Final = np.array(
+    scipy.io.loadmat(
+        Path(__file__).parent / "params/speech_weight.mat",
+        squeeze_me=True,
+    )["filt"]
 )
-SPEECH_FILTER = np.array(SPEECH_FILTER["filt"])
 
 
 def better_ear_speechweighted_snr(target: np.ndarray, noise: np.ndarray) -> float:
@@ -29,14 +25,13 @@ def better_ear_speechweighted_snr(target: np.ndarray, noise: np.ndarray) -> floa
         noise (np.ndarray):
 
     Returns:
+        (float)
+    Maximum Signal Noise Ratio between left and right channel.
     """
     if np.ndim(target) == 1:
         # analysis left ear and right ear for single channel target
-        try:
-            left_snr = speechweighted_snr(target, noise[:, 0])
-            right_snr = speechweighted_snr(target, noise[:, 1])
-        except IndexError:
-            raise
+        left_snr = speechweighted_snr(target, noise[:, 0])
+        right_snr = speechweighted_snr(target, noise[:, 1])
     else:
         # analysis left ear and right ear for two channel target
         left_snr = speechweighted_snr(target[:, 0], noise[:, 0])
@@ -57,15 +52,12 @@ def speechweighted_snr(target: np.ndarray, noise: np.ndarray) -> float:
         (float):
     Signal Noise Ratio
     """
-    try:
-        target_filt = scipy.signal.convolve(
-            target, SPEECH_FILTER, mode="full", method="fft"
-        )
-        noise_filt = scipy.signal.convolve(
-            noise, SPEECH_FILTER, mode="full", method="fft"
-        )
-    except ValueError:
-        raise
+
+    target_filt = scipy.signal.convolve(
+        target, SPEECH_FILTER, mode="full", method="fft"
+    )
+    noise_filt = scipy.signal.convolve(noise, SPEECH_FILTER, mode="full", method="fft")
+
     # rms of the target after speech weighted filter
     targ_rms = np.sqrt(np.mean(target_filt**2))
 
@@ -75,7 +67,7 @@ def speechweighted_snr(target: np.ndarray, noise: np.ndarray) -> float:
     return sw_snr
 
 
-def sum_signals(signals: list) -> Union[np.ndarray, Literal[0]]:
+def sum_signals(signals: list) -> np.ndarray | Literal[0]:
     """Return sum of a list of signals.
 
     Signals are stored as a list of ndarrays whose size can vary in the first
@@ -105,11 +97,10 @@ def pad(signal: np.ndarray, length: int) -> np.ndarray:
     Returns:
         np.array:
     """
-    # FIXME : Consider encapsulating in a 'try: ... except: ...' should the assertion not be met.
-    try:
-        assert length >= signal.shape[0]
-    except AssertionError:
-        raise
+
+    if length < signal.shape[0]:
+        raise ValueError("Length must be greater than signal length")
+
     return np.pad(
         signal, ([(0, length - signal.shape[0])] + ([(0, 0)] * (len(signal.shape) - 1)))
     )

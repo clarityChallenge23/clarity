@@ -1,46 +1,45 @@
+"""Data preparation for the E029 Sheffield CPC1 recipe."""
+
 import csv
 import json
 import logging
-import os
 import random
+from pathlib import Path
 
 import hydra
 import numpy as np
 import soundfile as sf
-from librosa import resample
+from librosa import resample  # pylint: disable=no-name-in-module
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from clarity.evaluator.msbg.audiogram import Audiogram
 from clarity.evaluator.msbg.msbg import Ear
-from clarity.evaluator.msbg.msbg_utils import MSBG_FS, pad, read_signal, write_signal
+from clarity.evaluator.msbg.msbg_utils import MSBG_FS, pad
+from clarity.utils.audiogram import Listener
+from clarity.utils.file_io import read_signal, write_signal
 
 logger = logging.getLogger(__name__)
 
-targ_fs = 16000
+target_sample_rate = 16000
 
 
 def run_data_split(cfg, track):
-    os.makedirs(os.path.join(cfg.path.exp_folder, "data_split"), exist_ok=True)
-    scene_train_json = os.path.join(
-        cfg.path.exp_folder, "data_split", f"scene_train_list{track}.json"
-    )
-    scene_dev_json = os.path.join(
-        cfg.path.exp_folder, "data_split", f"scene_dev_list{track}.json"
-    )
-    if os.path.isfile(scene_train_json) and os.path.isfile(scene_dev_json):
+    data_split_dir = Path(cfg.path.exp_folder) / "data_split"
+    data_split_dir.mkdir(parents=True, exist_ok=True)
+    scene_train_json = data_split_dir / f"scene_train_list{track}.json"
+    scene_dev_json = data_split_dir / f"scene_dev_list{track}.json"
+
+    if scene_train_json.exists() and scene_dev_json.exists():
         logger.info("Train set and dev set lists exist...")
         return
 
-    scenes_dict = json.load(
-        open(
-            os.path.join(
-                cfg.path.root,
-                "clarity_CPC1_data_train/metadata",
-                f"CPC1.{'train'+track}.json",
-            )
-        )
+    file_path = (
+        Path(cfg.path.root)
+        / f"clarity_CPC1_data_train/metadata/CPC1.{'train'+track}.json"
     )
+
+    with file_path.open("r", encoding="utf-8") as fp:
+        scenes_dict = json.load(fp)
     scene_list = []
     for item in scenes_dict:
         scene_list.append(item["scene"])
@@ -50,23 +49,24 @@ def run_data_split(cfg, track):
     )
     scene_train_list = list(set(scene_list) - set(scene_dev_list))
 
-    with open(scene_train_json, "w") as f:
-        json.dump(scene_train_list, f)
-    with open(scene_dev_json, "w") as f:
-        json.dump(scene_dev_list, f)
+    with scene_train_json.open("w", encoding="utf-8") as fp:
+        json.dump(scene_train_list, fp)
+    with scene_dev_json.open("w", encoding="utf-8") as fp:
+        json.dump(scene_dev_list, fp)
 
 
-def listen(ear, signal, audiogram_l, audiogram_r):
+def listen(ear, signal, listener: Listener):
     """
     Generate MSBG processed signal
     :param ear: MSBG ear
     :param wav: binaural signal
+    :param listener: listener object
     :return: binaural signal
     """
-    ear.set_audiogram(audiogram_l)
+    ear.set_audiogram(listener.audiogram_left)
     out_l = ear.process(signal[:, 0])
 
-    ear.set_audiogram(audiogram_r)
+    ear.set_audiogram(listener.audiogram_right)
     out_r = ear.process(signal[:, 1])
     if len(out_l[0]) != len(out_r[0]):
         diff = len(out_l[0]) - len(out_r[0])
@@ -80,171 +80,144 @@ def listen(ear, signal, audiogram_l, audiogram_r):
 def run_msbg_simulation(cfg, track):
     for split in ["train", "test"]:
         dataset = split + track
-        dataset_folder = os.path.join(cfg.path.root, "clarity_CPC1_data_" + split)
-        output_path = os.path.join(dataset_folder, "clarity_data/HA_outputs", dataset)
-        scenes = json.load(
-            open(os.path.join(dataset_folder, "metadata", f"CPC1.{dataset}.json"))
-        )
+        dataset_folder = Path(cfg.path.root) / f"clarity_CPC1_data_{split}"
+        output_path = dataset_folder / "clarity_data/HA_outputs" / dataset
+        file_path = dataset_folder / f"metadata/CPC1.{dataset}.json"
+        with file_path.open("r", encoding="utf-8") as fp:
+            scenes = json.load(fp)
         if split == "train":
-            listener_audiograms = json.load(
-                open(
-                    os.path.join(
-                        dataset_folder, "metadata", "listeners.CPC1_train.json"
-                    )
-                )
-            )
+            file_path = Path(dataset_folder) / "metadata/listeners.CPC1_train.json"
         else:
-            listener_audiograms = json.load(
-                open(
-                    os.path.join(dataset_folder, "metadata", "listeners.CPC1_all.json")
-                )
-            )
+            file_path = Path(dataset_folder) / "metadata/listeners.CPC1_all.json"
+        listener_dict = Listener.load_listener_dict(file_path)
 
         # initialize ear
         ear = Ear(**cfg["MSBGEar"])
 
         for scene_dict in tqdm(scenes):
             scene = scene_dict["scene"]
-            listener = scene_dict["listener"]
+            listener_id = scene_dict["listener"]
             system = scene_dict["system"]
-            signal_file = os.path.join(output_path, f"{scene}_{listener}_{system}.wav")
+            signal_file = output_path / f"{scene}_{listener_id}_{system}.wav"
 
             # signals to write
-            outfile_stem = f"{output_path}/{scene}_{listener}_{system}"
-            signal_files_to_write = [
-                f"{outfile_stem}_HL-output.wav",
-            ]
+            outfile_stem = output_path / f"{scene}_{listener_id}_{system}"
+            signal_files_to_write = [Path(f"{outfile_stem}_HL-output.wav")]
             # if all signals to write exist, pass
-            if all([os.path.isfile(f) for f in signal_files_to_write]):
+            if all(f.exists() for f in signal_files_to_write):
                 continue
             signal = read_signal(signal_file)
 
-            # retrieve audiograms
-            cfs = np.array(listener_audiograms[listener]["audiogram_cfs"])
-            audiogram_left = np.array(
-                listener_audiograms[listener]["audiogram_levels_l"]
-            )
-            left_audiogram = Audiogram(cfs=cfs, levels=audiogram_left)
-            audiogram_right = np.array(
-                listener_audiograms[listener]["audiogram_levels_r"]
-            )
-            right_audiogram = Audiogram(cfs=cfs, levels=audiogram_right)
+            listener = listener_dict[listener_id]
+            signals_to_write = [listen(ear, signal, listener)]
 
-            signals_to_write = [
-                listen(ear, signal, left_audiogram, right_audiogram),
-            ]
-            for i in range(len(signals_to_write)):
+            for signal, signal_file in zip(signals_to_write, signal_files_to_write):
                 write_signal(
-                    signal_files_to_write[i],
-                    signals_to_write[i],
+                    signal_file,
+                    signal,
                     MSBG_FS,
                     floating_point=True,
                 )
 
 
 def generate_data_split(
-    orig_data_json,
-    orig_signal_folder,
-    target_data_folder,
+    orig_data_json: Path,
+    orig_signal_folder: Path,
+    target_data_folder: Path,
     data_split,
     split_data_list,
     if_msbg=False,
     if_ref=False,
 ):
+    with orig_data_json.open("r", encoding="utf-8") as fp:
+        all_data_list = json.load(fp)
 
-    with open(orig_data_json, "r") as f:
-        all_data_list = json.load(f)
-
-    left_tgt_signal_folder = os.path.join(
-        target_data_folder, orig_signal_folder.split("/")[-2] + "_left"
-    )
-    right_tgt_signal_folder = os.path.join(
-        target_data_folder, orig_signal_folder.split("/")[-2] + "_right"
-    )
+    ext = ""
     if if_msbg:
-        left_tgt_signal_folder = left_tgt_signal_folder + "_msbg"
-        right_tgt_signal_folder = right_tgt_signal_folder + "_msbg"
-    if if_ref:
-        left_tgt_signal_folder = left_tgt_signal_folder + "_ref"
-        right_tgt_signal_folder = right_tgt_signal_folder + "_ref"
-    os.makedirs(left_tgt_signal_folder, exist_ok=True)
-    os.makedirs(right_tgt_signal_folder, exist_ok=True)
+        ext = "_msbg"
+    elif if_ref:
+        ext = "_ref"
+
+    left_tgt_signal_folder = target_data_folder / (
+        str(orig_signal_folder).split("/")[-2] + "_left" + ext
+    )
+
+    right_tgt_signal_folder = target_data_folder / (
+        str(orig_signal_folder).split("/")[-2] + "_right" + ext
+    )
+
+    left_tgt_signal_folder.mkdir(parents=True, exist_ok=True)
+    right_tgt_signal_folder.mkdir(parents=True, exist_ok=True)
 
     csv_lines_left = [["ID", "duration", "wav", "spk_id", "wrd"]]
     csv_lines_right = [["ID", "duration", "wav", "spk_id", "wrd"]]
     csv_lines_binaural = [["ID", "duration", "wav", "spk_id", "wrd"]]
 
-    left_csvfile = "left_" + data_split
-    right_csvfile = "right_" + data_split
-    binaural_csvfile = "binaural_" + data_split
-    if if_msbg:
-        left_csvfile += "_msbg"
-        right_csvfile += "_msbg"
-        binaural_csvfile += "_msbg"
-    if if_ref:
-        left_csvfile += "_ref"
-        right_csvfile += "_ref"
-        binaural_csvfile += "_ref"
-    left_csvfile = os.path.join(target_data_folder, left_csvfile + ".csv")
-    right_csvfile = os.path.join(target_data_folder, right_csvfile + ".csv")
-    binaural_csvfile = os.path.join(target_data_folder, binaural_csvfile + ".csv")
+    left_csvfile = target_data_folder / f"left_{data_split}{ext}.csv"
+    right_csvfile = target_data_folder / f"right_{data_split}{ext}.csv"
+    binaural_csvfile = target_data_folder / f"binaural_{data_split}{ext}.csv"
 
     for item in tqdm(all_data_list):
         snt_id = item["signal"]
         if snt_id.split("_")[0] in split_data_list or data_split == "test":
             if if_msbg:
-                wav_file = os.path.join(orig_signal_folder, snt_id + "_HL-output.wav")
+                wav_file = orig_signal_folder / f"{snt_id}_HL-output.wav"
             elif if_ref:
-                wav_file = os.path.join(
-                    orig_signal_folder,
-                    "../..",
-                    "scenes",
-                    snt_id.split("_")[0] + "_target_anechoic.wav",
+                wav_file = orig_signal_folder / (
+                    f"../../scenes/{snt_id.split('_')[0]}_target_anechoic.wav"
                 )
             else:
-                wav_file = os.path.join(orig_signal_folder, snt_id + ".wav")
-            wav_file_left = os.path.join(left_tgt_signal_folder, snt_id + ".wav")
-            wav_file_right = os.path.join(right_tgt_signal_folder, snt_id + ".wav")
-            if os.path.isfile(wav_file_left) and os.path.isfile(wav_file_right):
+                wav_file = orig_signal_folder / f"{snt_id}.wav"
+            wav_file_left = left_tgt_signal_folder / f"{snt_id}.wav"
+            wav_file_right = right_tgt_signal_folder / f"{snt_id}.wav"
+            if wav_file_left.exists() and wav_file_right.exists():
                 continue
 
             spk_id = item["listener"]  # should be listener_id
             wrds = item["prompt"].upper()
 
             utt, orig_fs = sf.read(wav_file)
-            utt_16k = resample(np.array(utt).transpose(), orig_fs, targ_fs).transpose()
+            utt_16k = resample(
+                np.array(utt).transpose(), orig_sr=orig_fs, target_sr=target_sample_rate
+            ).transpose()
             duration = (
-                len(utt_16k[2 * targ_fs :, 0]) / targ_fs
+                len(utt_16k[2 * target_sample_rate :, 0]) / target_sample_rate
             )  # Get rid of the first two seconds, as there is no speech
-            sf.write(wav_file_left, utt_16k[2 * targ_fs :, 0], targ_fs)
-            sf.write(wav_file_right, utt_16k[2 * targ_fs :, 1], targ_fs)
+            sf.write(
+                wav_file_left, utt_16k[2 * target_sample_rate :, 0], target_sample_rate
+            )
+            sf.write(
+                wav_file_right, utt_16k[2 * target_sample_rate :, 1], target_sample_rate
+            )
 
-            csv_lines_left.append([snt_id, str(duration), wav_file_left, spk_id, wrds])
+            csv_lines_left.append(
+                [snt_id, str(duration), str(wav_file_left), spk_id, wrds]
+            )
             csv_lines_right.append(
-                [snt_id, str(duration), wav_file_right, spk_id, wrds]
+                [snt_id, str(duration), str(wav_file_right), spk_id, wrds]
             )
             csv_lines_binaural.append(
-                ["left_" + snt_id, str(duration), wav_file_left, spk_id, wrds]
+                ["left_" + snt_id, str(duration), str(wav_file_left), spk_id, wrds]
             )
             csv_lines_binaural.append(
-                ["right_" + snt_id, str(duration), wav_file_right, spk_id, wrds]
+                ["right_" + snt_id, str(duration), str(wav_file_right), spk_id, wrds]
             )
 
-    with open(left_csvfile, mode="w") as csv_f:
+    with left_csvfile.open(mode="w", encoding="utf-8") as csv_f:
         csv_writer = csv.writer(
             csv_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
         for line in csv_lines_left:
             csv_writer.writerow(line)
 
-    with open(right_csvfile, mode="w") as csv_f:
+    with right_csvfile.open(mode="w", encoding="utf-8") as csv_f:
         csv_writer = csv.writer(
             csv_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
         for line in csv_lines_right:
             csv_writer.writerow(line)
 
-    with open(binaural_csvfile, mode="w") as csv_f:
+    with binaural_csvfile.open(mode="w", encoding="utf-8") as csv_f:
         csv_writer = csv.writer(
             csv_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
@@ -253,32 +226,31 @@ def generate_data_split(
 
 
 def run_signal_generation_train(cfg, track):
-    train_json_path = os.path.join(
-        cfg.path.cpc1_train_data, f"metadata/CPC1.{'train'+track}.json"
+    train_json_path = (
+        Path(cfg.path.cpc1_train_data) / f"metadata/CPC1.{'train'+track}.json"
     )
-    train_signal_folder = os.path.join(
-        cfg.path.cpc1_train_data, f"clarity_data/HA_outputs/{'train'+track}/"
+
+    train_signal_folder = (
+        Path(cfg.path.cpc1_train_data) / f"clarity_data/HA_outputs/{'train'+track}/"
     )
-    target_folder = os.path.join(cfg.path.exp_folder, "cpc1_asr_data" + track)
+
+    target_folder = Path(cfg.path.exp_folder) / f"cpc1_asr_data{track}"
     lists_to_generate = [
-        os.path.join(
-            cfg.path.exp_folder, "data_split", f"scene_train_list{track}.json"
-        ),
-        os.path.join(cfg.path.exp_folder, "data_split", f"scene_dev_list{track}.json"),
+        Path(cfg.path.exp_folder) / f"data_split/scene_train_list{track}.json",
+        Path(cfg.path.exp_folder) / f"data_split/scene_dev_list{track}.json",
     ]
 
     datasets_to_generate = []
-    for i in range(len(lists_to_generate)):
-        with open(lists_to_generate[i], "r") as f:
-            datasets_to_generate.append(json.load(f))
-            f.close()
+    for list_to_generate in lists_to_generate:
+        with list_to_generate.open("r", encoding="utf-8") as fp:
+            datasets_to_generate.append(json.load(fp))
 
-    for i in range(len(lists_to_generate)):
+    for list_to_generate, dataset in zip(lists_to_generate, datasets_to_generate):
         # generate_data_split(
         #     train_json_path,
         #     train_signal_folder,
         #     target_folder,
-        #     os.path.basename(lists_to_generate[i]).split("_")[1],
+        #     list_to_generate.name.split("_")[1],
         #     datasets_to_generate[i],
         # )
 
@@ -286,8 +258,8 @@ def run_signal_generation_train(cfg, track):
             train_json_path,
             train_signal_folder,
             target_folder,
-            os.path.basename(lists_to_generate[i]).split("_")[1],
-            datasets_to_generate[i],
+            list_to_generate.name.split("_")[1],
+            dataset,
             if_msbg=True,
         )
 
@@ -295,20 +267,21 @@ def run_signal_generation_train(cfg, track):
             train_json_path,
             train_signal_folder,
             target_folder,
-            os.path.basename(lists_to_generate[i]).split("_")[1],
-            datasets_to_generate[i],
+            list_to_generate.name.split("_")[1],
+            dataset,
             if_ref=True,
         )
 
 
 def run_signal_generation_test(cfg, track):
-    test_json_path = os.path.join(
-        cfg.path.cpc1_test_data, f"metadata/CPC1.{'test'+track}.json"
+    test_json_path = (
+        Path(cfg.path.cpc1_test_data) / f"metadata/CPC1.{'test'+track}.json"
     )
-    test_signal_folder = os.path.join(
-        cfg.path.cpc1_test_data, f"clarity_data/HA_outputs/{'test'+track}/"
+    test_signal_folder = (
+        Path(cfg.path.cpc1_test_data) / f"clarity_data/HA_outputs/{'test'+track}/"
     )
-    target_folder = os.path.join(cfg.path.exp_folder, "cpc1_asr_data" + track)
+
+    target_folder = Path(cfg.path.exp_folder) / f"cpc1_asr_data{track}"
 
     # generate_data_split(
     #     test_json_path, test_signal_folder, target_folder, "test", [],
@@ -331,6 +304,7 @@ def run(cfg: DictConfig) -> None:
         track = ""
     else:
         logger.error("cpc1_track has to be closed or open")
+        raise ValueError("cpc1_track has to be closed or open")
 
     logger.info("Split all training data into train set and dev set.")
     run_data_split(cfg, track)
@@ -342,5 +316,6 @@ def run(cfg: DictConfig) -> None:
     run_signal_generation_test(cfg, track)
 
 
+# pylint: disable=no-value-for-parameter
 if __name__ == "__main__":
     run()

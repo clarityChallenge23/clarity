@@ -1,10 +1,11 @@
-"""Functions for ???"""
-from typing import Dict
+"""Functions for HASPI neural network stage."""
+
+from __future__ import annotations
 
 import numpy as np
 
 
-def get_neural_net():
+def get_neural_net() -> tuple[dict, list[np.ndarray], list[np.ndarray], float]:
     """
     Provide the weights derived for the ensemble of ten neural
     networks used for the HASPI_v2 intelligibility model. The neural networks
@@ -14,17 +15,18 @@ def get_neural_net():
     Arguments: None
 
     Returned values:
-    neural_net_params (dict): parameters defining the neural network
-    weights_hidden (): cell array 10 x 1 for the weights linking the input to the hidden
-             layer. Each cell is a 11 x 4 matrix of weights
-    weights_out (): call array 5 x 1 for the weights linking the hidden to the output
-             layer. Each cell is a 5 x 1 vector of weights.
-    normalization_factor (): normalization so that the maximum neural net output is exactly 1.
+        neural_net_params (dict): parameters defining the neural network
+        weights_hidden (): cell array 10 x 1 for the weights linking the input to the
+        hidden layer. Each cell is a 11 x 4 matrix of weights
+        weights_out (): call array 5 x 1 for the weights linking the hidden to the
+            output layer. Each cell is a 5 x 1 vector of weights.
+        normalization_factor (): normalization so that the maximum neural net output is
+            exactly 1.
 
     Updates:
-    James M. Kates, 8 October 2019.
-    Version for new neural network using actual TFS scores, 24 October 2019.
-    Translated from MATLAB to Python by Zuzanna Podwinska, March 2022.
+        James M. Kates, 8 October 2019.
+        Version for new neural network using actual TFS scores, 24 October 2019.
+        Translated from MATLAB to Python by Zuzanna Podwinska, March 2022.
     """
     # Set up the neural network parameters
     neural_net_params = {}
@@ -209,15 +211,18 @@ def get_neural_net():
 
 
 def nn_feed_forward_ensemble(
-    data: np.ndarray, neural_net_params: Dict, weights_hidden, weights_out
-) -> float:
+    data: np.ndarray,
+    neural_net_params: dict,
+    weights_hidden: list[np.ndarray],
+    weights_out: list[np.ndarray],
+) -> np.ndarray:
     """
     Function to compute the neural network ensemble response to a set of
     inputs. The neural network is defined in NNfeedforwardZ.
 
     Args:
     data (np.ndarray): array of features input to the neural network
-    neural_net_params (dict): vector of neural network paramters
+    neural_net_params (dict): vector of neural network parameters
     weights_hidden (list): cell array of hidden layer weights for each network
     weights_out (list): cell array of output layer weights for each network
 
@@ -235,7 +240,7 @@ def nn_feed_forward_ensemble(
     ncond = data.shape[0]  # Number of conditions in the input data
     n_networks = len(weights_hidden)  # Number of networks in the ensemble
 
-    # Ensemble average of the predictions over the set of neural networks used for training
+    # Ensemble average of predictions over set of neural networks used for training
     predict = np.zeros((ncond, n_networks))
     for k in range(n_networks):
         for n in range(ncond):
@@ -250,11 +255,14 @@ def nn_feed_forward_ensemble(
 
 
 def nn_feed_forward(
-    data: np.ndarray, neural_net_params: Dict, weights_hidden, weights_out
-):
+    data: np.ndarray,
+    neural_net_params: dict,
+    weights_hidden: np.ndarray,
+    weights_out: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute the outputs at each layer of a neural network given
-    the input to the network and the weights. The activiation function is an
+    the input to the network and the weights. The activation function is an
     offset logistic function that gives either a logsig or hyperbolic
     tangent; the outputs from each layer have been reduced by the offset. The
     structure of the network is an input layer, one hidden layer, and an
